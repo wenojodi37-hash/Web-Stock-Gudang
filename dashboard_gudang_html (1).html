@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dashboard Stock Gudang - Full</title>
+  <!-- Libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <link href="https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    body{background:#f3f4f6}
+    .card{background:white;border-radius:12px;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,0.06)}
+    .status-habis{background:#ef4444;color:white;padding:6px 10px;border-radius:8px}
+    .status-akan{background:#f59e0b;color:black;padding:6px 10px;border-radius:8px}
+    .status-cukup{background:#10b981;color:white;padding:6px 10px;border-radius:8px}
+    table th, table td{padding:8px;border-bottom:1px solid #e5e7eb}
+  </style>
+</head>
+<body class="p-6">
+  <div class="max-w-6xl mx-auto">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-semibold">Dashboard Stock Gudang</h1>
+      <div class="space-x-2">
+        <button id="exportPdfBtn" class="px-3 py-2 bg-blue-600 text-white rounded-md">Export PDF</button>
+        <button id="downloadJsonBtn" class="px-3 py-2 bg-gray-700 text-white rounded-md">Download JSON</button>
+        <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" class="hidden" />
+        <button id="uploadBtn" class="px-3 py-2 bg-green-600 text-white rounded-md">Import Excel/CSV</button>
+      </div>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-6 mb-6">
+      <div class="card">
+        <label class="block text-sm font-medium">Sumber Data Google Sheets (optional)</label>
+        <input id="gsheetId" placeholder="Masukkan Google Sheet ID (atau kosong)" class="mt-2 w-full border rounded-md p-2" />
+        <p class="text-xs text-gray-500 mt-2">Jika ingin tarik data otomatis dari Google Sheets, publish sheet ke web lalu masukkan <code>spreadsheetId</code>.</p>
+        <button id="loadGsheet" class="mt-3 px-3 py-2 bg-indigo-600 text-white rounded-md">Load dari Google Sheets</button>
+      </div>
+
+      <div class="card">
+        <label class="block text-sm font-medium">Filter / Cari</label>
+        <div class="mt-2 flex gap-2">
+          <select id="filterCategory" class="w-1/2 p-2 border rounded-md">
+            <option value="all">Semua</option>
+            <option value="Kemasan">Kemasan</option>
+            <option value="Material">Material</option>
+          </select>
+          <input id="searchInput" placeholder="Cari item..." class="w-1/2 p-2 border rounded-md" />
+        </div>
+      </div>
+
+      <div class="card">
+        <label class="block text-sm font-medium">Settings Threshold</label>
+        <p class="text-xs text-gray-600 mt-2">Anda bisa atur rule warna: <em>akan habis</em> = di bawah minimum</p>
+        <div class="mt-2 flex items-center gap-2">
+          <label class="text-sm">Rule:</label>
+          <select id="ruleType" class="p-2 border rounded-md">
+            <option value="below_min">Di bawah Minimum</option>
+            <option value="percent">Persentase Minimum (%)</option>
+          </select>
+          <input id="ruleValue" type="number" value="0" class="p-2 border rounded-md w-24" />
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-6">
+      <canvas id="stockChart" height="120"></canvas>
+    </div>
+
+    <div class="card">
+      <div class="overflow-x-auto">
+        <table id="stockTable" class="w-full">
+          <thead>
+            <tr class="text-left text-sm text-gray-600">
+              <th>Item</th>
+              <th>Kategori</th>
+              <th>Stock</th>
+              <th>Minimum</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <p class="text-xs text-gray-500 mt-4">Instruksi hosting: upload file ini ke GitHub repo lalu aktifkan GitHub Pages (branch main / docs). Saya juga bisa bantu langkah demi langkah.</p>
+  </div>
+
+  <script>
+    // ----- Default data -----
+    let items = [
+      {item: 'Preform 14 gr', kategori: 'Kemasan', stock: 12000, min: 8000},
+      {item: 'Preform 12 gr', kategori: 'Kemasan', stock: 7000, min: 8000},
+      {item: 'Label 250 ml', kategori: 'Material', stock: 20000, min: 15000},
+      {item: 'Label 500 ml', kategori: 'Material', stock: 9000, min: 10000},
+      {item: 'Cap Seal', kategori: 'Kemasan', stock: 3000, min: 5000},
+      {item: 'Karton 250 ml', kategori: 'Material', stock: 6000, min: 5000},
+      {item: 'Karton 500 ml', kategori: 'Material', stock: 4000, min: 6000},
+      {item: 'Gallon 15 L', kategori: 'Kemasan', stock: 700, min: 1000},
+      {item: 'Tutup Galon', kategori: 'Kemasan', stock: 500, min: 700},
+      {item: 'Sticker Galon', kategori: 'Material', stock: 15000, min: 12000}
+    ];
+
+    // Chart.js instance
+    let stockChart;
+
+    // Helpers for status
+    function getStatus(it, ruleType, ruleValue){
+      if(it.stock === 0) return {text:'Habis', css:'status-habis'};
+      if(ruleType === 'below_min'){
+        if(it.stock < it.min) return {text:'Akan Habis', css:'status-akan'};
+        return {text:'Cukup', css:'status-cukup'};
+      } else {
+        // percent rule
+        let pct = (it.stock / it.min) * 100;
+        if(pct <= ruleValue) return {text:'Akan Habis', css:'status-akan'};
+        return {text:'Cukup', css:'status-cukup'};
+      }
+    }
+
+    function renderTable(data){
+      const tbody = document.querySelector('#stockTable tbody');
+      tbody.innerHTML = '';
+      const ruleType = document.getElementById('ruleType').value;
+      const ruleValue = Number(document.getElementById('ruleValue').value) || 0;
+      data.forEach(it =>{
+        const s = getStatus(it, ruleType, ruleValue);
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td class="font-medium">${it.item}</td><td>${it.kategori}</td><td>${it.stock.toLocaleString()}</td><td>${it.min.toLocaleString()}</td><td><span class="${s.css}">${s.text}</span></td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderChart(data){
+      const labels = data.map(d=>d.item);
+      const stockData = data.map(d=>d.stock);
+      const minData = data.map(d=>d.min);
+
+      const ctx = document.getElementById('stockChart').getContext('2d');
+      if(stockChart) stockChart.destroy();
+      stockChart = new Chart(ctx, {
+        type:'bar',
+        data:{
+          labels: labels,
+          datasets:[
+            {label:'Stock', data:stockData},
+            {label:'Minimum', data:minData}
+          ]
+        },
+        options:{responsive:true, plugins:{legend:{position:'top'}}, scales:{y:{beginAtZero:true}}}
+      });
+    }
+
+    function refreshView(){
+      // apply filter & search
+      const cat = document.getElementById('filterCategory').value;
+      const q = document.getElementById('searchInput').value.toLowerCase();
+      let filtered = items.filter(i => (cat==='all' || i.kategori===cat) && i.item.toLowerCase().includes(q));
+      renderTable(filtered);
+      renderChart(filtered);
+    }
+
+    // Initial render
+    refreshView();
+
+    // UI bindings
+    document.getElementById('filterCategory').addEventListener('change', refreshView);
+    document.getElementById('searchInput').addEventListener('input', refreshView);
+    document.getElementById('ruleType').addEventListener('change', refreshView);
+    document.getElementById('ruleValue').addEventListener('input', refreshView);
+
+    // Import Excel/CSV
+    const fileInput = document.getElementById('fileInput');
+    document.getElementById('uploadBtn').addEventListener('click', ()=> fileInput.click());
+    fileInput.addEventListener('change', e=>{
+      const f = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = function(ev){
+        const data = ev.target.result;
+        let workbook = XLSX.read(data, {type:'binary'});
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(firstSheet, {header:1});
+        // Expect header row: Item | Kategori | Stock | Minimum
+        const parsed = [];
+        for(let r=1;r<json.length;r++){
+          const row = json[r];
+          if(!row || row.length<4) continue;
+          parsed.push({item:String(row[0]), kategori:String(row[1]), stock:Number(row[2])||0, min:Number(row[3])||0});
+        }
+        if(parsed.length) items = parsed;
+        refreshView();
+      };
+      reader.readAsBinaryString(f);
+    });
+
+    // Download JSON
+    document.getElementById('downloadJsonBtn').addEventListener('click', ()=>{
+      const blob = new Blob([JSON.stringify(items,null,2)],{type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'stock_gudang.json'; a.click(); URL.revokeObjectURL(url);
+    });
+
+    // Export PDF
+    document.getElementById('exportPdfBtn').addEventListener('click', async ()=>{
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({orientation:'landscape'});
+      doc.setFontSize(14);
+      doc.text('Dashboard Stock Gudang', 14, 16);
+      // Simple table export
+      const cols = ['Item','Kategori','Stock','Minimum','Status'];
+      const rows = [];
+      const ruleType = document.getElementById('ruleType').value;
+      const ruleValue = Number(document.getElementById('ruleValue').value) || 0;
+      items.forEach(it=>{
+        const s = getStatus(it, ruleType, ruleValue);
+        rows.push([it.item, it.kategori, it.stock.toString(), it.min.toString(), s.text]);
+      });
+      doc.autoTable({head:[cols], body:rows, startY:22});
+      doc.save('Dashboard_Stock_Gudang.pdf');
+    });
+
+    // Google Sheets loader (requires sheet published to web)
+    document.getElementById('loadGsheet').addEventListener('click', async ()=>{
+      const id = document.getElementById('gsheetId').value.trim();
+      if(!id){ alert('Masukkan Google Sheet ID terlebih dahulu'); return; }
+      try{
+        // Using Google Sheets v4 public CSV export for first sheet
+        const url = `https://docs.google.com/spreadsheets/d/${id}/export?format=csv`;
+        const res = await fetch(url);
+        const text = await res.text();
+        const wb = XLSX.read(text, {type:'string'});
+        // parse CSV
+        const sheet = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1});
+        const parsed = [];
+        for(let r=1;r<sheet.length;r++){
+          const row = sheet[r]; if(!row || row.length<4) continue;
+          parsed.push({item:String(row[0]), kategori:String(row[1]), stock:Number(row[2])||0, min:Number(row[3])||0});
+        }
+        if(parsed.length){ items = parsed; refreshView(); alert('Data berhasil dimuat dari Google Sheets'); }
+        else alert('Tidak menemukan data di sheet');
+      }catch(err){ console.error(err); alert('Gagal memuat. Pastikan sheet sudah di-publish ke web dan ID benar.'); }
+    });
+
+    // On load: attach Chart when DOM ready
+    window.addEventListener('DOMContentLoaded', ()=>{
+      refreshView();
+    });
+
+  </script>
+
+  <!-- Notes:
+    - Untuk hosting gratis: buat repo di GitHub, push file ini (index.html) lalu enable GitHub Pages (Settings → Pages → choose branch). URL akan muncul.
+    - Jika ingin Google Sheets otomatis: buka Google Sheets -> File -> Publish to web -> pilih sheet, lalu paste spreadsheetId di field atas (bagian between /d/ and /edit).
+    - Excel import expects columns: Item | Kategori | Stock | Minimum (header row)
+    - Saya bisa bantu upload ke GitHub dan atur GitHub Pages jika mau.
+  -->
+</body>
+</html>
